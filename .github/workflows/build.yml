@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+
   workflow_dispatch:
 
 permissions:
@@ -13,6 +14,7 @@ jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     env:
       CI: true
@@ -20,6 +22,7 @@ jobs:
         -Dorg.gradle.jvmargs=-Xmx4g
         -Dorg.gradle.daemon=false
         -Dorg.gradle.parallel=false
+        -Dorg.gradle.caching=false
         -Dorg.gradle.configuration-cache=false
 
     steps:
@@ -32,7 +35,7 @@ jobs:
 
 
       # ============================================================
-      # 2. JAVA
+      # 2. JAVA 17
       # ============================================================
       - name: Setup JDK 17
         uses: actions/setup-java@v5
@@ -49,9 +52,9 @@ jobs:
 
 
       # ============================================================
-      # 4. SDK PACKAGES
+      # 4. INSTALL SDK
       # ============================================================
-      - name: Install Android SDK
+      - name: Install Android SDK packages
         shell: bash
         run: |
           set -e
@@ -65,47 +68,41 @@ jobs:
             "build-tools;35.0.0" \
             "build-tools;36.0.0"
 
-          echo "Android SDK installed."
+          echo "Android SDK ready."
 
 
       # ============================================================
       # 5. FIND ZIP
       # ============================================================
-      - name: Find ZIP project
+      - name: Find ZIP
         shell: bash
         run: |
           set -e
 
-          ZIP_FILE=""
-
-          while IFS= read -r FILE; do
-            ZIP_FILE="$FILE"
-            break
-          done < <(
+          ZIP_FILE="$(
             find . \
               -maxdepth 3 \
               -type f \
               -iname "*.zip" \
-              ! -path "./android-project/*" \
-              ! -path "./output/*" \
-              | sort
-          )
+              | sort \
+              | head -n 1
+          )"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "::error::No ZIP project found."
+            echo "::error::No ZIP file found."
             exit 1
           fi
 
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-          echo "ZIP selected:"
+          echo "Using:"
           echo "$ZIP_FILE"
 
 
       # ============================================================
-      # 6. EXTRACT ZIP
+      # 6. EXTRACT
       # ============================================================
-      - name: Extract ZIP project
+      - name: Extract ZIP
         shell: bash
         run: |
           set -e
@@ -117,41 +114,24 @@ jobs:
 
           echo "ZIP extracted."
 
-          echo
-          echo "Project structure:"
-          find android-project \
-            -maxdepth 6 \
-            -type f \
-            | sort \
-            | head -600
-
 
       # ============================================================
-      # 7. DETECT PROJECT ROOT
+      # 7. DETECT PROJECT
       # ============================================================
-      - name: Detect Android project root
+      - name: Detect Android project
         shell: bash
         run: |
           set -e
 
-          GRADLEW=""
-
-          while IFS= read -r FILE; do
-            GRADLEW="$FILE"
-            break
-          done < <(
+          GRADLEW="$(
             find android-project \
               -type f \
               -name "gradlew" \
-              | sort
-          )
+              | sort \
+              | head -n 1
+          )"
 
-          SETTINGS=""
-
-          while IFS= read -r FILE; do
-            SETTINGS="$FILE"
-            break
-          done < <(
+          SETTINGS="$(
             find android-project \
               -type f \
               \( \
@@ -159,15 +139,11 @@ jobs:
                 -o \
                 -name "settings.gradle.kts" \
               \) \
-              | sort
-          )
+              | sort \
+              | head -n 1
+          )"
 
-          BUILD_FILE=""
-
-          while IFS= read -r FILE; do
-            BUILD_FILE="$FILE"
-            break
-          done < <(
+          ROOT_BUILD="$(
             find android-project \
               -type f \
               \( \
@@ -175,24 +151,21 @@ jobs:
                 -o \
                 -name "build.gradle.kts" \
               \) \
-              | sort
-          )
+              | sort \
+              | head -n 1
+          )"
 
           if [ -n "$GRADLEW" ]; then
-
             PROJECT_DIR="$(dirname "$GRADLEW")"
 
           elif [ -n "$SETTINGS" ]; then
-
             PROJECT_DIR="$(dirname "$SETTINGS")"
 
-          elif [ -n "$BUILD_FILE" ]; then
-
-            PROJECT_DIR="$(dirname "$BUILD_FILE")"
+          elif [ -n "$ROOT_BUILD" ]; then
+            PROJECT_DIR="$(dirname "$ROOT_BUILD")"
 
           else
-
-            echo "::error::No Android Gradle project detected."
+            echo "::error::Android Gradle project not found."
 
             find android-project \
               -maxdepth 10 \
@@ -200,22 +173,20 @@ jobs:
               | sort
 
             exit 1
-
           fi
 
           PROJECT_DIR="$(realpath "$PROJECT_DIR")"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo
-          echo "PROJECT ROOT:"
+          echo "Detected:"
           echo "$PROJECT_DIR"
 
 
       # ============================================================
-      # 8. SHOW PROJECT FILES
+      # 8. SHOW ORIGINAL PROJECT
       # ============================================================
-      - name: Inspect project
+      - name: Inspect original project
         shell: bash
         run: |
           set +e
@@ -223,13 +194,19 @@ jobs:
           cd "$PROJECT_DIR"
 
           echo "=========================================="
-          echo "PROJECT"
+          echo "PROJECT FILES"
           echo "=========================================="
 
-          pwd
+          find . \
+            -maxdepth 6 \
+            -type f \
+            | sort \
+            | head -800
 
           echo
-          echo "Important files:"
+          echo "=========================================="
+          echo "GRADLE FILES"
+          echo "=========================================="
 
           find . \
             -maxdepth 6 \
@@ -265,28 +242,26 @@ jobs:
           if [ -f "./gradlew" ] && \
              [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
 
-            echo "Existing Gradle Wrapper detected."
+            echo "Existing Gradle Wrapper found."
 
           else
 
-            echo "Gradle Wrapper is incomplete."
-            echo "Generating wrapper."
+            echo "Gradle Wrapper incomplete."
 
-            TEMP_GRADLE="/tmp/gradle"
+            TEMP_DIR="/tmp/gradle-bootstrap"
 
-            rm -rf "$TEMP_GRADLE"
-
-            mkdir -p "$TEMP_GRADLE"
+            rm -rf "$TEMP_DIR"
+            mkdir -p "$TEMP_DIR"
 
             curl -fsSL \
-              -o "$TEMP_GRADLE/gradle.zip" \
+              -o "$TEMP_DIR/gradle.zip" \
               "https://services.gradle.org/distributions/gradle-9.3.1-bin.zip"
 
             unzip -q \
-              "$TEMP_GRADLE/gradle.zip" \
-              -d "$TEMP_GRADLE"
+              "$TEMP_DIR/gradle.zip" \
+              -d "$TEMP_DIR"
 
-            export PATH="$TEMP_GRADLE/gradle-9.3.1/bin:$PATH"
+            export PATH="$TEMP_DIR/gradle-9.3.1/bin:$PATH"
 
             gradle wrapper \
               --gradle-version 9.3.1 \
@@ -297,7 +272,7 @@ jobs:
           chmod +x ./gradlew
 
           echo
-          echo "Gradle version:"
+          echo "Wrapper version:"
           ./gradlew --version
 
 
@@ -307,13 +282,13 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
-          cache-cleanup: on-success
+          cache-disabled: true
 
 
       # ============================================================
-      # 11. JAVA + GRADLE ENVIRONMENT
+      # 11. BUILD ENVIRONMENT
       # ============================================================
-      - name: Check build environment
+      - name: Print build environment
         shell: bash
         run: |
           set +e
@@ -344,7 +319,7 @@ jobs:
 
 
       # ============================================================
-      # 12. LIST GRADLE TASKS
+      # 12. GRADLE TASK LIST
       # ============================================================
       - name: Inspect Gradle tasks
         shell: bash
@@ -358,32 +333,36 @@ jobs:
           ./gradlew tasks \
             --no-daemon \
             --no-configuration-cache \
+            --no-build-cache \
             --stacktrace \
+            --info \
             --warning-mode=all \
             --console=plain \
             2>&1 \
             | tee build-logs/tasks.log
 
-          EXIT_CODE=${PIPESTATUS[0]}
+          CODE=${PIPESTATUS[0]}
 
-          if [ "$EXIT_CODE" -ne 0 ]; then
+          if [ "$CODE" -ne 0 ]; then
 
             echo
-            echo "Gradle tasks command failed."
+            echo "Gradle task discovery failed."
 
-            tail -n 250 \
+            echo
+            echo "LAST 300 LINES:"
+
+            tail -n 300 \
               build-logs/tasks.log \
               || true
 
-            exit "$EXIT_CODE"
-
+            exit "$CODE"
           fi
 
 
       # ============================================================
-      # 13. CHECK ANDROID MODULES
+      # 13. GOOGLE SERVICES - DETECTION ONLY
       # ============================================================
-      - name: Detect Android modules
+      - name: Inspect Google Services
         shell: bash
         run: |
           set +e
@@ -391,64 +370,37 @@ jobs:
           cd "$PROJECT_DIR"
 
           echo "=========================================="
-          echo "ANDROID MODULES"
+          echo "GOOGLE SERVICES"
           echo "=========================================="
 
-          find . \
-            -type f \
-            \( \
-              -name "AndroidManifest.xml" \
-              -o \
-              -name "build.gradle" \
-              -o \
-              -name "build.gradle.kts" \
-            \) \
-            | sort \
-            | head -n 300
-
-
-      # ============================================================
-      # 14. GOOGLE SERVICES CHECK
-      # ============================================================
-      - name: Check Google Services
-        shell: bash
-        run: |
-          set +e
-
-          cd "$PROJECT_DIR"
-
-          GOOGLE_FILE="$(
+          GOOGLE_JSON="$(
             find . \
               -type f \
               -name "google-services.json" \
               | head -n 1
           )"
 
-          if [ -n "$GOOGLE_FILE" ]; then
-
-            echo "google-services.json found:"
-            echo "$GOOGLE_FILE"
-
+          if [ -n "$GOOGLE_JSON" ]; then
+            echo "google-services.json:"
+            echo "$GOOGLE_JSON"
           else
-
-            echo "google-services.json not found."
-
-            echo
-            echo "Checking whether project actually uses Google Services:"
-
-            grep -RniE \
-              "google-services|com.google.gms.google-services" \
-              . \
-              --include="*.gradle" \
-              --include="*.gradle.kts" \
-              | head -n 100 \
-              || true
-
+            echo "google-services.json: NOT FOUND"
           fi
+
+          echo
+          echo "Google Services references:"
+
+          grep -RniE \
+            "google-services|com.google.gms.google-services" \
+            . \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            | head -n 100 \
+            || true
 
 
       # ============================================================
-      # 15. DEBUG KEYSTORE
+      # 14. DEBUG KEYSTORE
       # ============================================================
       - name: Prepare debug keystore
         shell: bash
@@ -479,9 +431,49 @@ jobs:
 
 
       # ============================================================
+      # 15. GRADLE HELP
+      # ============================================================
+      - name: Validate Gradle configuration
+        shell: bash
+        run: |
+          set -o pipefail
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew help \
+            --no-daemon \
+            --no-configuration-cache \
+            --no-build-cache \
+            --stacktrace \
+            --info \
+            --warning-mode=all \
+            --console=plain \
+            2>&1 \
+            | tee build-logs/help.log
+
+          CODE=${PIPESTATUS[0]}
+
+          if [ "$CODE" -ne 0 ]; then
+
+            echo
+            echo "=========================================="
+            echo "GRADLE CONFIGURATION ERROR"
+            echo "=========================================="
+
+            grep -nE \
+              "What went wrong:|FAILURE:|Execution failed|Caused by:|error:|Error:" \
+              build-logs/help.log \
+              | tail -n 200 \
+              || true
+
+            exit "$CODE"
+          fi
+
+
+      # ============================================================
       # 16. CLEAN
       # ============================================================
-      - name: Clean project
+      - name: Clean
         shell: bash
         run: |
           set -o pipefail
@@ -491,6 +483,7 @@ jobs:
           ./gradlew clean \
             --no-daemon \
             --no-configuration-cache \
+            --no-build-cache \
             --stacktrace \
             --info \
             --warning-mode=all \
@@ -498,24 +491,25 @@ jobs:
             2>&1 \
             | tee build-logs/clean.log
 
-          EXIT_CODE=${PIPESTATUS[0]}
+          CODE=${PIPESTATUS[0]}
 
-          if [ "$EXIT_CODE" -ne 0 ]; then
+          if [ "$CODE" -ne 0 ]; then
 
             echo
+            echo "=========================================="
             echo "CLEAN FAILED"
+            echo "=========================================="
 
-            tail -n 300 \
+            tail -n 350 \
               build-logs/clean.log \
               || true
 
-            exit "$EXIT_CODE"
-
+            exit "$CODE"
           fi
 
 
       # ============================================================
-      # 17. BUILD APK
+      # 17. BUILD DEBUG APK
       # ============================================================
       - name: Build Debug APK
         shell: bash
@@ -524,15 +518,14 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          mkdir -p build-logs
-
           echo "=========================================="
-          echo "START APK BUILD"
+          echo "ASSEMBLE DEBUG APK"
           echo "=========================================="
 
           ./gradlew assembleDebug \
             --no-daemon \
             --no-configuration-cache \
+            --no-build-cache \
             --stacktrace \
             --info \
             --warning-mode=all \
@@ -540,80 +533,78 @@ jobs:
             2>&1 \
             | tee build-logs/assembleDebug.log
 
-          EXIT_CODE=${PIPESTATUS[0]}
+          CODE=${PIPESTATUS[0]}
 
           echo
-          echo "Gradle exit code: $EXIT_CODE"
+          echo "Gradle exit code: $CODE"
 
-          if [ "$EXIT_CODE" -ne 0 ]; then
+          if [ "$CODE" -ne 0 ]; then
 
             echo
             echo "=========================================="
-            echo "BUILD FAILED"
+            echo "FAILED TASK"
             echo "=========================================="
-
-            echo
-            echo "FAILED TASKS:"
 
             grep -nE \
-              "> Task .* FAILED|Execution failed for task|FAILED" \
+              "> Task .* FAILED|Execution failed for task" \
               build-logs/assembleDebug.log \
               | tail -n 100 \
               || true
 
             echo
-            echo "WHAT WENT WRONG:"
+            echo "=========================================="
+            echo "WHAT WENT WRONG"
+            echo "=========================================="
 
             grep -n \
-              -A 100 \
+              -A 120 \
               "What went wrong:" \
               build-logs/assembleDebug.log \
-              | tail -n 150 \
+              | tail -n 160 \
               || true
 
             echo
-            echo "ROOT CAUSE:"
+            echo "=========================================="
+            echo "ROOT CAUSE"
+            echo "=========================================="
 
             grep -nE \
-              "Caused by:|Exception:|error:|Error:" \
+              "Caused by:|error:|Error:|Exception:" \
               build-logs/assembleDebug.log \
-              | tail -n 200 \
+              | tail -n 250 \
               || true
 
             echo
-            echo "LAST 400 LINES:"
+            echo "=========================================="
+            echo "LAST 500 LINES"
+            echo "=========================================="
 
-            tail -n 400 \
+            tail -n 500 \
               build-logs/assembleDebug.log \
               || true
 
-            exit "$EXIT_CODE"
-
+            exit "$CODE"
           fi
 
           echo
-          echo "=========================================="
-          echo "BUILD SUCCESSFUL"
-          echo "=========================================="
+          echo "BUILD SUCCESSFUL."
 
 
       # ============================================================
       # 18. FIND APK
       # ============================================================
-      - name: Find generated APK
+      - name: Find APK
         if: success()
         shell: bash
         run: |
           set -e
-
-          echo "Searching for generated APK..."
 
           APK="$(
             find "$PROJECT_DIR" \
               -type f \
               -name "*.apk" \
               | grep -Ei \
-                "/(debug|release)/.*\.apk$" \
+                "debug.*\.apk$" \
               | head -n 1
           )"
 
@@ -630,7 +621,10 @@ jobs:
 
           if [ -z "$APK" ]; then
 
-            echo "::error::No APK generated."
+            echo "::error::APK was not generated."
+
+            echo
+            echo "Build outputs:"
 
             find "$PROJECT_DIR" \
               -type f \
@@ -638,7 +632,6 @@ jobs:
               | sort
 
             exit 1
-
           fi
 
           rm -rf output
@@ -646,10 +639,7 @@ jobs:
 
           cp "$APK" output/app-debug.apk
 
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
-
-          echo
-          echo "Generated APK:"
+          echo "APK:"
           echo "$APK"
 
           echo
@@ -657,17 +647,13 @@ jobs:
 
 
       # ============================================================
-      # 19. APK ANALYSIS
+      # 19. APK INFO
       # ============================================================
       - name: APK information
         if: success()
         shell: bash
         run: |
           set +e
-
-          echo "=========================================="
-          echo "APK"
-          echo "=========================================="
 
           ls -lh output/app-debug.apk
 
@@ -696,9 +682,9 @@ jobs:
 
 
       # ============================================================
-      # 21. UPLOAD COMPLETE LOGS
+      # 21. UPLOAD ALL DIAGNOSTICS
       # ============================================================
-      - name: Upload build diagnostics
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -713,15 +699,15 @@ jobs:
 
 
       # ============================================================
-      # 22. FINAL FAILURE REPORT
+      # 22. FINAL FAILURE SUMMARY
       # ============================================================
-      - name: Final failure report
+      - name: Final failure summary
         if: failure()
         shell: bash
         run: |
           echo
           echo "=================================================="
-          echo "FINAL BUILD FAILURE REPORT"
+          echo "FINAL FAILURE SUMMARY"
           echo "=================================================="
 
           LOG="$PROJECT_DIR/build-logs/assembleDebug.log"
@@ -737,15 +723,6 @@ jobs:
               || true
 
             echo
-            echo "WHAT WENT WRONG:"
-            grep -n \
-              -A 80 \
-              "What went wrong:" \
-              "$LOG" \
-              | tail -n 100 \
-              || true
-
-            echo
             echo "CAUSE:"
             grep -nE \
               "Caused by:|error:|Error:|Exception:" \
@@ -755,6 +732,6 @@ jobs:
 
           else
 
-            echo "assembleDebug log does not exist."
+            echo "assembleDebug log not found."
 
           fi
