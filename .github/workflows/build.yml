@@ -22,23 +22,42 @@ jobs:
         -Dorg.gradle.caching=true
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+
+      # ============================================================
+      # 2. Setup Java
+      # مهم: لا نضع cache: gradle هنا
+      # لأن مشروع Gradle موجود داخل ZIP
+      # ============================================================
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
+          cache: false
 
+
+      # ============================================================
+      # 3. Setup Android SDK
+      # ============================================================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+
+      # ============================================================
+      # 4. تثبيت أدوات Android
+      # ============================================================
       - name: Install Android SDK packages
         shell: bash
         run: |
           set -e
+
           yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
@@ -48,48 +67,41 @@ jobs:
             "build-tools;35.0.0" \
             "build-tools;36.0.0"
 
-      - name: Install Gradle 9.3.1
-        shell: bash
-        run: |
-          set -e
 
-          GRADLE_VERSION="9.3.1"
-
-          curl -fsSL \
-            -o /tmp/gradle.zip \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-
-          sudo rm -rf "/opt/gradle-${GRADLE_VERSION}"
-
-          sudo unzip -q \
-            /tmp/gradle.zip \
-            -d /opt
-
-          echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
-
-          gradle --version
-
+      # ============================================================
+      # 5. البحث عن ZIP
+      # ============================================================
       - name: Find ZIP project
         shell: bash
         run: |
           set -e
 
-          ZIP_FILE="$(find . \
-            -maxdepth 3 \
-            -type f \
-            -iname '*.zip' \
-            ! -path './android-project/*' \
-            | head -n 1)"
+          ZIP_FILE="$(
+            find . \
+              -maxdepth 3 \
+              -type f \
+              -iname "*.zip" \
+              ! -path "./android-project/*" \
+              | head -n 1
+          )"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in the repository."
+            echo "ERROR: No ZIP file found."
+            echo
+            echo "ZIP files currently available:"
+            find . -type f -iname "*.zip"
             exit 1
           fi
 
-          echo "Using ZIP: $ZIP_FILE"
-
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
+          echo "Using ZIP:"
+          echo "$ZIP_FILE"
+
+
+      # ============================================================
+      # 6. فك الضغط
+      # ============================================================
       - name: Extract ZIP
         shell: bash
         run: |
@@ -98,27 +110,29 @@ jobs:
           rm -rf android-project
           mkdir -p android-project
 
-          unzip -q \
-            "$ZIP_FILE" \
-            -d android-project
+          unzip -q "$ZIP_FILE" -d android-project
 
-          echo "Extracted files:"
+          echo "ZIP extracted successfully."
 
-          find android-project \
-            -maxdepth 4 \
-            -type f \
-            | sort \
-            | head -200
+          echo
+          echo "Project tree:"
+          find android-project -maxdepth 4 -type f | sort | head -300
 
-      - name: Detect Android Gradle project
+
+      # ============================================================
+      # 7. اكتشاف مشروع Android
+      # ============================================================
+      - name: Detect Android project
         shell: bash
         run: |
           set -e
 
+          echo "Searching for Android Gradle project..."
+
           GRADLEW="$(
             find android-project \
               -type f \
-              -name 'gradlew' \
+              -name "gradlew" \
               | head -n 1
           )"
 
@@ -126,9 +140,20 @@ jobs:
             find android-project \
               -type f \
               \( \
-                -name 'settings.gradle' \
+                -name "settings.gradle" \
                 -o \
-                -name 'settings.gradle.kts' \
+                -name "settings.gradle.kts" \
+              \) \
+              | head -n 1
+          )"
+
+          BUILD_FILE="$(
+            find android-project \
+              -type f \
+              \( \
+                -name "build.gradle" \
+                -o \
+                -name "build.gradle.kts" \
               \) \
               | head -n 1
           )"
@@ -137,29 +162,28 @@ jobs:
 
             PROJECT_DIR="$(dirname "$GRADLEW")"
 
+            echo "Found Gradle wrapper."
+
           elif [ -n "$SETTINGS" ]; then
 
             PROJECT_DIR="$(dirname "$SETTINGS")"
 
-          else
+            echo "Found Gradle settings file."
 
-            BUILD_FILE="$(
-              find android-project \
-                -type f \
-                \( \
-                  -name 'build.gradle' \
-                  -o \
-                  -name 'build.gradle.kts' \
-                \) \
-                | head -n 1
-            )"
-
-            if [ -z "$BUILD_FILE" ]; then
-              echo "ERROR: No Android Gradle project was found inside the ZIP."
-              exit 1
-            fi
+          elif [ -n "$BUILD_FILE" ]; then
 
             PROJECT_DIR="$(dirname "$BUILD_FILE")"
+
+            echo "Found Gradle build file."
+
+          else
+
+            echo "ERROR: No Android Gradle project found."
+            echo
+            echo "Detected files:"
+            find android-project -maxdepth 5 -type f | sort | head -500
+
+            exit 1
 
           fi
 
@@ -167,9 +191,84 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project:"
+          echo
+          echo "Detected Android project:"
           echo "$PROJECT_DIR"
 
+
+      # ============================================================
+      # 8. فحص ملفات المشروع قبل الإصلاح
+      # ============================================================
+      - name: Inspect Gradle project
+        shell: bash
+        run: |
+          set +e
+
+          cd "$PROJECT_DIR"
+
+          echo "========================================"
+          echo "ROOT PROJECT"
+          echo "========================================"
+
+          pwd
+
+          echo
+          echo "Files:"
+
+          find . \
+            -maxdepth 3 \
+            -type f \
+            \( \
+              -name "settings.gradle" \
+              -o \
+              -name "settings.gradle.kts" \
+              -o \
+              -name "build.gradle" \
+              -o \
+              -name "build.gradle.kts" \
+              -o \
+              -name "gradle-wrapper.properties" \
+            \) \
+            -print
+
+
+      # ============================================================
+      # 9. تثبيت Gradle 9.3.1
+      # ============================================================
+      - name: Install Gradle 9.3.1
+        shell: bash
+        run: |
+          set -e
+
+          GRADLE_VERSION="9.3.1"
+
+          if command -v gradle >/dev/null 2>&1; then
+            echo "System Gradle already exists."
+            gradle --version
+          else
+
+            curl -fsSL \
+              -o /tmp/gradle.zip \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+
+            sudo rm -rf "/opt/gradle-${GRADLE_VERSION}"
+
+            sudo unzip -q \
+              /tmp/gradle.zip \
+              -d /opt
+
+            echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+            export PATH="/opt/gradle-${GRADLE_VERSION}/bin:$PATH"
+
+            gradle --version
+
+          fi
+
+
+      # ============================================================
+      # 10. تجهيز Gradle Wrapper
+      # ============================================================
       - name: Prepare Gradle Wrapper
         shell: bash
         run: |
@@ -181,6 +280,8 @@ jobs:
 
           if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
 
+            echo "Gradle wrapper properties found."
+
             sed -i -E \
               's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip#' \
               gradle/wrapper/gradle-wrapper.properties
@@ -188,6 +289,9 @@ jobs:
           fi
 
           if [ ! -f "./gradlew" ]; then
+
+            echo "gradlew not found."
+            echo "Generating wrapper..."
 
             gradle wrapper \
               --gradle-version 9.3.1 \
@@ -199,6 +303,9 @@ jobs:
 
           if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
 
+            echo "Wrapper properties still missing."
+            echo "Generating wrapper again..."
+
             ./gradlew wrapper \
               --gradle-version 9.3.1 \
               --distribution-type bin
@@ -209,61 +316,89 @@ jobs:
             's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip#' \
             gradle/wrapper/gradle-wrapper.properties
 
-      - name: Repair missing Google Services configuration
+          echo
+          echo "Gradle wrapper prepared."
+
+          ./gradlew --version
+
+
+      # ============================================================
+      # 11. إصلاح Google Services
+      # ============================================================
+      - name: Handle Google Services
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          if find . \
-            -type f \
-            -name 'google-services.json' \
-            | grep -q .; then
+          GOOGLE_JSON="$(
+            find . \
+              -type f \
+              -name "google-services.json" \
+              | head -n 1
+          )"
+
+          if [ -n "$GOOGLE_JSON" ]; then
 
             echo "google-services.json found."
-            echo "Keeping Google Services configuration."
+            echo "$GOOGLE_JSON"
 
-            exit 0
+          else
+
+            echo "google-services.json NOT found."
+            echo "Removing Google Services plugin references."
+
+            while IFS= read -r -d '' FILE; do
+
+              echo "Checking: $FILE"
+
+              sed -i \
+                '/com\.google\.gms\.google-services/d' \
+                "$FILE" || true
+
+              sed -i \
+                '/apply plugin:.*google-services/d' \
+                "$FILE" || true
+
+              sed -i \
+                '/google-services/d' \
+                "$FILE" || true
+
+            done < <(
+              find . \
+                -type f \
+                \( \
+                  -name "build.gradle" \
+                  -o \
+                  -name "build.gradle.kts" \
+                \) \
+                -print0
+            )
 
           fi
 
-          echo "google-services.json not found."
-          echo "Removing direct Google Services plugin references."
 
-          while IFS= read -r -d '' FILE; do
-
-            sed -i \
-              '/com\.google\.gms\.google-services/d' \
-              "$FILE" || true
-
-            sed -i \
-              '/google-services/d' \
-              "$FILE" || true
-
-          done < <(
-            find . \
-              -type f \
-              \( \
-                -name 'build.gradle' \
-                -o \
-                -name 'build.gradle.kts' \
-              \) \
-              -print0
-          )
-
-      - name: Generate Android debug keystore
+      # ============================================================
+      # 12. إنشاء debug.keystore
+      # ============================================================
+      - name: Prepare debug keystore
         shell: bash
         run: |
           set -e
 
           mkdir -p "$HOME/.android"
 
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+          DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
 
-            keytool -genkeypair \
+          if [ ! -f "$DEBUG_KEYSTORE" ]; then
+
+            echo "Generating debug.keystore..."
+
+            keytool \
+              -genkeypair \
               -v \
-              -keystore "$HOME/.android/debug.keystore" \
+              -keystore "$DEBUG_KEYSTORE" \
               -storepass android \
               -alias androiddebugkey \
               -keypass android \
@@ -272,91 +407,65 @@ jobs:
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
 
+          else
+
+            echo "debug.keystore already exists."
+
           fi
 
-          cd "$PROJECT_DIR"
+          echo "Debug keystore:"
+          ls -lh "$DEBUG_KEYSTORE"
 
-          find . \
-            -type f \
-            \( \
-              -name 'build.gradle' \
-              -o \
-              -name 'build.gradle.kts' \
-            \) \
-            -print0 |
-          while IFS= read -r -d '' FILE; do
 
-            DIR="$(dirname "$FILE")"
-
-            cp \
-              "$HOME/.android/debug.keystore" \
-              "$DIR/debug.keystore"
-
-          done
-
-      - name: Show project information
+      # ============================================================
+      # 13. تنظيف المشروع
+      # ============================================================
+      - name: Gradle clean
         shell: bash
         run: |
-          set +e
+          set -e
 
-          cd "$PROJECT_DIR"
-
-          echo "========================================"
-          echo "PROJECT"
-          echo "========================================"
-
-          pwd
-
-          echo
-          echo "Gradle version:"
-
-          ./gradlew --version
-
-          echo
-          echo "Gradle files:"
-
-          find . \
-            -maxdepth 3 \
-            -type f \
-            \( \
-              -name 'settings.gradle' \
-              -o \
-              -name 'settings.gradle.kts' \
-              -o \
-              -name 'build.gradle' \
-              -o \
-              -name 'build.gradle.kts' \
-            \) \
-            -print
-
-      - name: Clean project
-        shell: bash
-        run: |
           cd "$PROJECT_DIR"
 
           ./gradlew clean \
             --no-daemon \
             --stacktrace
 
+
+      # ============================================================
+      # 14. بناء Debug APK
+      # ============================================================
       - name: Build Debug APK
         shell: bash
         run: |
+          set -e
+
           cd "$PROJECT_DIR"
+
+          chmod +x ./gradlew
 
           ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace \
             --info
 
-      - name: Find generated APK
+
+      # ============================================================
+      # 15. البحث عن APK
+      # ============================================================
+      - name: Find APK
         shell: bash
         run: |
           set -e
 
+          echo "Searching for generated APK..."
+
           APK="$(
             find "$PROJECT_DIR" \
               -type f \
-              -iname '*debug*.apk' \
+              -name "*.apk" \
+              | grep -Ei \
+                "(debug|unsigned).*\.apk$" \
               | head -n 1
           )"
 
@@ -365,7 +474,7 @@ jobs:
             APK="$(
               find "$PROJECT_DIR" \
                 -type f \
-                -name '*.apk' \
+                -name "*.apk" \
                 | head -n 1
             )"
 
@@ -373,11 +482,22 @@ jobs:
 
           if [ -z "$APK" ]; then
 
-            echo "ERROR: No APK was generated."
+            echo "ERROR: APK was not generated."
+
+            echo
+            echo "Possible APK output directories:"
+
+            find "$PROJECT_DIR" \
+              -type d \
+              -path "*/build/outputs/*" \
+              -print
 
             exit 1
 
           fi
+
+          echo "APK found:"
+          echo "$APK"
 
           mkdir -p output
 
@@ -385,14 +505,33 @@ jobs:
             "$APK" \
             output/app-debug.apk
 
-          echo "Generated APK:"
-          echo "$APK"
-
           echo
-          echo "APK size:"
+          echo "APK copied to:"
+          ls -lh output/app-debug.apk
+
+
+      # ============================================================
+      # 16. معلومات APK
+      # ============================================================
+      - name: APK information
+        shell: bash
+        run: |
+          set +e
+
+          echo "========================================"
+          echo "APK INFORMATION"
+          echo "========================================"
 
           ls -lh output/app-debug.apk
 
+          if command -v apkanalyzer >/dev/null 2>&1; then
+            apkanalyzer apk summary output/app-debug.apk
+          fi
+
+
+      # ============================================================
+      # 17. رفع APK
+      # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -401,14 +540,18 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload build diagnostics on failure
+
+      # ============================================================
+      # 18. رفع تقارير الأخطاء عند فشل البناء
+      # ============================================================
+      - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-diagnostics
           path: |
-            ${{ env.PROJECT_DIR }}/**/*.log
-            ${{ env.PROJECT_DIR }}/**/build/reports/**
-            ${{ env.PROJECT_DIR }}/**/build/outputs/logs/**
+            android-project/**/build/reports/**
+            android-project/**/build/outputs/logs/**
+            android-project/**/*.log
           if-no-files-found: ignore
           retention-days: 7
